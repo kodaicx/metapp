@@ -2,22 +2,28 @@ from fastapi import FastAPI, Query, Response
 import imaplib
 import email
 import re
+import html
 
 app = FastAPI()
 
 IMAP_SERVER = "imap.firstmail.ltd"
 IMAP_PORT = 993
 
+def clean_html(raw_html: str) -> str:
+    # HTML etiketlerini ve özel karakterleri temizle
+    clean_text = re.sub(r'<[^>]+>', ' ', raw_html)
+    return html.unescape(clean_text)
+
 def extract_meta_code(text: str) -> str | None:
-    # 1. Öncelik: "Onay kodu", "code", "kod" kelimelerinden hemen sonra gelen 6 haneli sayı
-    code_match = re.search(r'(?:onay kodu|code|kod)[\s:]*([0-9]{6})', text, re.IGNORECASE)
-    if code_match:
-        return code_match.group(1)
+    # 1. Onay kodu / Code anahtar kelimesinden hemen sonra gelen 6 haneli kod
+    match = re.search(r'(?:onay kodu|confirmation code|code|kod)[\s:]*([0-9]{6})', text, re.IGNORECASE)
+    if match:
+        return match.group(1)
     
-    # 2. Öncelik: Metin içindeki herhangi bir 6 haneli bağımsız sayı
-    general_match = re.search(r'\b\d{6}\b', text)
-    if general_match:
-        return general_match.group(0)
+    # 2. Metindeki ilk bağımsız 6 haneli sayı
+    match_general = re.search(r'\b\d{6}\b', text)
+    if match_general:
+        return match_general.group(0)
         
     return None
 
@@ -28,17 +34,15 @@ def get_code(mail_user: str = Query(...), mail_pass: str = Query(...)):
         mail.login(mail_user, mail_pass)
         mail.select("INBOX")
 
-        # Tüm mailleri sorgula
         status, messages = mail.search(None, 'ALL')
         if not messages[0]:
             mail.logout()
             return Response(content="NO_MAIL", media_type="text/plain")
 
-        # Mailleri SAYISAL olarak büyükten küçüğe sırala (En yeni mail her zaman İLK elemandır)
+        # En yeni mail ilk sırada olacak şekilde sırala
         email_ids = [int(i) for i in messages[0].split()]
         email_ids.sort(reverse=True)
 
-        # En yeni 5 maili incele
         for e_id in email_ids[:5]:
             _, msg_data = mail.fetch(str(e_id), '(RFC822)')
             for response_part in msg_data:
@@ -46,25 +50,21 @@ def get_code(mail_user: str = Query(...), mail_pass: str = Query(...)):
                     msg = email.message_from_bytes(response_part[1])
                     
                     body = ""
-                    # Öncelikle sade metin (plain text) kısmını almaya çalış
                     if msg.is_multipart():
                         for part in msg.walk():
-                            content_type = part.get_content_type()
-                            if content_type == "text/plain":
+                            if part.get_content_type() in ["text/plain", "text/html"]:
                                 try:
-                                    body = part.get_payload(decode=True).decode(errors="ignore")
-                                    break
-                                except:
-                                    pass
-                            elif content_type == "text/html" and not body:
-                                try:
-                                    body = part.get_payload(decode=True).decode(errors="ignore")
+                                    payload = part.get_payload(decode=True).decode(errors="ignore")
+                                    body += " " + payload
                                 except:
                                     pass
                     else:
                         body = msg.get_payload(decode=True).decode(errors="ignore")
 
-                    code = extract_meta_code(body)
+                    # HTML kodlarını temizle
+                    text_only = clean_html(body)
+                    code = extract_meta_code(text_only)
+                    
                     if code:
                         mail.logout()
                         return Response(content=code, media_type="text/plain")
